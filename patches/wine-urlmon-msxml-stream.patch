@@ -1,0 +1,233 @@
+diff --git a/dlls/urlmon/binding.c b/dlls/urlmon/binding.c
+index b36fa161781..167568d0e01 100644
+--- a/dlls/urlmon/binding.c
++++ b/dlls/urlmon/binding.c
+@@ -1506,6 +1506,16 @@ static HRESULT Binding_Create(IMoniker *mon, Binding *binding_ctx, IUri *uri, IB
+         return hres;
+     }
+ 
++    /* Native MSXML asks URLMon for an asynchronous IStream, but its load()
++     * implementation expects a readable stream when BindToStorage returns.
++     * Wine currently returns MK_S_ASYNCHRONOUS before the first WinINet
++     * callback, so MSXML reports a successful load with an empty document and
++     * immediately aborts the binding.  Keep this synchronous, cache-backed
++     * compatibility path opt-in for the private SOLIDWORKS runtime. */
++    if (IsEqualGUID(&IID_IStream, riid) &&
++        GetEnvironmentVariableW(L"SOLIDWORKS_URLMON_SYNC_BINDTOSTORAGE", NULL, 0))
++        ret->bindf &= ~(BINDF_ASYNCHRONOUS | BINDF_ASYNCSTORAGE);
++
+     TRACE("bindf %08lx\n", ret->bindf);
+     dump_BINDINFO(&ret->bindinfo);
+ 
+@@ -1551,12 +1561,26 @@ static HRESULT Binding_Create(IMoniker *mon, Binding *binding_ctx, IUri *uri, IB
+     return S_OK;
+ }
+ 
++static void wait_for_binding(Binding *binding)
++{
++    MSG msg;
++
++    while (!(binding->state & BINDING_STOPPED))
++    {
++        MsgWaitForMultipleObjects(0, NULL, FALSE, 5000, QS_POSTMESSAGE);
++        while (PeekMessageW(&msg, binding->notif_hwnd, WM_USER, WM_USER + 117, PM_REMOVE | PM_NOYIELD))
++        {
++            TranslateMessage(&msg);
++            DispatchMessageW(&msg);
++        }
++    }
++}
++
+ static HRESULT start_binding(IMoniker *mon, Binding *binding_ctx, IUri *uri, IBindCtx *pbc,
+                              BOOL to_obj, REFIID riid, Binding **ret)
+ {
+     Binding *binding = NULL;
+     HRESULT hres;
+-    MSG msg;
+ 
+     hres = Binding_Create(mon, binding_ctx, uri, pbc, to_obj, riid, &binding);
+     if(FAILED(hres))
+@@ -1595,14 +1619,8 @@ static HRESULT start_binding(IMoniker *mon, Binding *binding_ctx, IUri *uri, IBi
+         }
+     }
+ 
+-    while(!(binding->bindf & BINDF_ASYNCHRONOUS) &&
+-          !(binding->state & BINDING_STOPPED)) {
+-        MsgWaitForMultipleObjects(0, NULL, FALSE, 5000, QS_POSTMESSAGE);
+-        while (PeekMessageW(&msg, binding->notif_hwnd, WM_USER, WM_USER+117, PM_REMOVE|PM_NOYIELD)) {
+-            TranslateMessage(&msg);
+-            DispatchMessageW(&msg);
+-        }
+-    }
++    if (!(binding->bindf & BINDF_ASYNCHRONOUS))
++        wait_for_binding(binding);
+ 
+     *ret = binding;
+     return S_OK;
+diff --git a/dlls/urlmon/bindprot.c b/dlls/urlmon/bindprot.c
+index 0a7afc75e1b..05e313c58d4 100644
+--- a/dlls/urlmon/bindprot.c
++++ b/dlls/urlmon/bindprot.c
+@@ -471,6 +471,7 @@ static HRESULT WINAPI BindProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUr
+     CLSID clsid = IID_NULL;
+     IUnknown *protocol_unk = NULL;
+     LPOLESTR clsid_str;
++    DWORD handler_pi = 0;
+     HRESULT hres;
+ 
+     TRACE("(%p)->(%p %p %p %08lx %p)\n", This, pUri, pOIProtSink, pOIBindInfo, grfPI, dwReserved);
+@@ -479,6 +480,8 @@ static HRESULT WINAPI BindProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUr
+         return E_INVALIDARG;
+ 
+     This->pi = grfPI;
++    if (GetEnvironmentVariableW(L"SOLIDWORKS_URLMON_SYNC_BINDTOSTORAGE", NULL, 0))
++        handler_pi = grfPI;
+ 
+     if(This->uri) {
+         SysFreeString(This->display_uri);
+@@ -541,7 +544,7 @@ static HRESULT WINAPI BindProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUr
+     hres = IUnknown_QueryInterface(protocol_unk, &IID_IInternetProtocolEx, (void**)&protocolex);
+     if(SUCCEEDED(hres)) {
+         hres = IInternetProtocolEx_StartEx(protocolex, pUri, &This->IInternetProtocolSink_iface,
+-                &This->IInternetBindInfo_iface, 0, NULL);
++                &This->IInternetBindInfo_iface, handler_pi, NULL);
+         IInternetProtocolEx_Release(protocolex);
+     }else {
+         hres = IUri_GetDisplayUri(pUri, &This->display_uri);
+@@ -549,7 +552,7 @@ static HRESULT WINAPI BindProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUr
+             return hres;
+ 
+         hres = IInternetProtocol_Start(protocol, This->display_uri, &This->IInternetProtocolSink_iface,
+-                &This->IInternetBindInfo_iface, 0, 0);
++                &This->IInternetBindInfo_iface, handler_pi, 0);
+     }
+ 
+     if(SUCCEEDED(hres))
+diff --git a/dlls/urlmon/http.c b/dlls/urlmon/http.c
+index a24006ba08c..a83ae2824e5 100644
+--- a/dlls/urlmon/http.c
++++ b/dlls/urlmon/http.c
+@@ -828,6 +828,10 @@ static HRESULT WINAPI HttpProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUr
+     if(scheme != (This->https ? URL_SCHEME_HTTPS : URL_SCHEME_HTTP))
+         return MK_E_SYNTAX;
+ 
++    if ((grfPI & PI_SYNCHRONOUS) &&
++        GetEnvironmentVariableW(L"SOLIDWORKS_URLMON_SYNC_BINDTOSTORAGE", NULL, 0))
++        This->base.flags |= FLAG_SYNC_SESSION;
++
+     return protocol_start(&This->base, (IInternetProtocol*)&This->IInternetProtocolEx_iface, pUri,
+                           pOIProtSink, pOIBindInfo);
+ }
+diff --git a/dlls/urlmon/protocol.c b/dlls/urlmon/protocol.c
+index 6c08393b809..03d1182a13e 100644
+--- a/dlls/urlmon/protocol.c
++++ b/dlls/urlmon/protocol.c
+@@ -261,7 +261,7 @@ static HRESULT write_post_stream(Protocol *protocol)
+     return S_OK;
+ }
+ 
+-static HINTERNET create_internet_session(IInternetBindInfo *bind_info)
++static HINTERNET create_internet_session(IInternetBindInfo *bind_info, DWORD flags)
+ {
+     LPWSTR global_user_agent = NULL;
+     LPOLESTR user_agent = NULL;
+@@ -273,7 +273,7 @@ static HINTERNET create_internet_session(IInternetBindInfo *bind_info)
+     if(hres != S_OK || !size)
+         global_user_agent = get_useragent();
+ 
+-    ret = InternetOpenW(user_agent ? user_agent : global_user_agent, 0, NULL, NULL, INTERNET_FLAG_ASYNC);
++    ret = InternetOpenW(user_agent ? user_agent : global_user_agent, 0, NULL, NULL, flags);
+     free(global_user_agent);
+     CoTaskMemFree(user_agent);
+     if(!ret) {
+@@ -281,11 +281,13 @@ static HINTERNET create_internet_session(IInternetBindInfo *bind_info)
+         return NULL;
+     }
+ 
+-    InternetSetStatusCallbackW(ret, internet_status_callback);
++    if (flags & INTERNET_FLAG_ASYNC)
++        InternetSetStatusCallbackW(ret, internet_status_callback);
+     return ret;
+ }
+ 
+ static HINTERNET internet_session;
++static HINTERNET sync_internet_session;
+ 
+ HINTERNET get_internet_session(IInternetBindInfo *bind_info)
+ {
+@@ -297,22 +299,42 @@ HINTERNET get_internet_session(IInternetBindInfo *bind_info)
+     if(!bind_info)
+         return NULL;
+ 
+-    new_session = create_internet_session(bind_info);
++    new_session = create_internet_session(bind_info, INTERNET_FLAG_ASYNC);
+     if(new_session && InterlockedCompareExchangePointer((void**)&internet_session, new_session, NULL))
+         InternetCloseHandle(new_session);
+ 
+     return internet_session;
+ }
+ 
++static HINTERNET get_sync_internet_session(IInternetBindInfo *bind_info)
++{
++    HINTERNET new_session;
++
++    if (sync_internet_session)
++        return sync_internet_session;
++
++    if (!bind_info)
++        return NULL;
++
++    new_session = create_internet_session(bind_info, 0);
++    if (new_session && InterlockedCompareExchangePointer((void **)&sync_internet_session, new_session, NULL))
++        InternetCloseHandle(new_session);
++
++    return sync_internet_session;
++}
++
+ void update_user_agent(WCHAR *user_agent)
+ {
+     if(internet_session)
+         InternetSetOptionW(internet_session, INTERNET_OPTION_USER_AGENT, user_agent, lstrlenW(user_agent));
++    if(sync_internet_session)
++        InternetSetOptionW(sync_internet_session, INTERNET_OPTION_USER_AGENT, user_agent, lstrlenW(user_agent));
+ }
+ 
+ HRESULT protocol_start(Protocol *protocol, IInternetProtocol *prot, IUri *uri,
+         IInternetProtocolSink *protocol_sink, IInternetBindInfo *bind_info)
+ {
++    HINTERNET session;
+     DWORD request_flags;
+     HRESULT hres;
+ 
+@@ -332,7 +354,9 @@ HRESULT protocol_start(Protocol *protocol, IInternetProtocol *prot, IUri *uri,
+     if(!(protocol->bindf & BINDF_FROMURLMON))
+         report_progress(protocol, BINDSTATUS_DIRECTBIND, NULL);
+ 
+-    if(!get_internet_session(bind_info))
++    session = protocol->flags & FLAG_SYNC_SESSION ? get_sync_internet_session(bind_info) :
++            get_internet_session(bind_info);
++    if(!session)
+         return report_result(protocol, INET_E_NO_SESSION);
+ 
+     request_flags = INTERNET_FLAG_KEEP_CONNECTION;
+@@ -343,7 +367,7 @@ HRESULT protocol_start(Protocol *protocol, IInternetProtocol *prot, IUri *uri,
+     if(protocol->bind_info.dwOptions & BINDINFO_OPTIONS_DISABLEAUTOREDIRECTS)
+         request_flags |= INTERNET_FLAG_NO_AUTO_REDIRECT;
+ 
+-    hres = protocol->vtbl->open_request(protocol, uri, request_flags, internet_session, bind_info);
++    hres = protocol->vtbl->open_request(protocol, uri, request_flags, session, bind_info);
+     if(FAILED(hres)) {
+         protocol_close_connection(protocol);
+         return report_result(protocol, hres);
+diff --git a/dlls/urlmon/urlmon_main.h b/dlls/urlmon/urlmon_main.h
+index 81b0d629f53..962144e1068 100644
+--- a/dlls/urlmon/urlmon_main.h
++++ b/dlls/urlmon/urlmon_main.h
+@@ -150,6 +150,7 @@ struct ProtocolVtbl {
+ #define FLAG_RESULT_REPORTED          0x0020
+ #define FLAG_ERROR                    0x0040
+ #define FLAG_SYNC_READ                0x0080
++#define FLAG_SYNC_SESSION             0x0100
+ 
+ HRESULT protocol_start(Protocol*,IInternetProtocol*,IUri*,IInternetProtocolSink*,IInternetBindInfo*);
+ HRESULT protocol_continue(Protocol*,PROTOCOLDATA*);

@@ -1,0 +1,11 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.cpp text eol=lf
+*.patch text eol=lf
+assets/fonts/*.ttf binary
+# Preserve required diff-context spaces and verbatim upstream license text.
+patches/*.patch -whitespace
+assets/fonts/LICENSE.txt -whitespace
+licenses/Wine-LGPL-2.1.txt -whitespace

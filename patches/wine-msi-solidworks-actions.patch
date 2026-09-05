@@ -1,0 +1,177 @@
+diff --git a/dlls/msi/custom.c b/dlls/msi/custom.c
+index 12a7c3c3676..3449f58e707 100644
+--- a/dlls/msi/custom.c
++++ b/dlls/msi/custom.c
+@@ -320,12 +320,70 @@ static UINT custom_get_process_return( HANDLE process )
+     return ERROR_SUCCESS;
+ }
+ 
+-static UINT custom_get_thread_return( MSIPACKAGE *package, HANDLE thread )
++static BOOL solidworks_registration_workaround_enabled( const MSIPACKAGE *package )
++{
++    WCHAR enabled[2];
++
++    return package && package->ProductCode &&
++           (!wcsicmp( package->ProductCode, L"{DFB580AD-E043-49A4-9380-F0D054E1C0FF}" ) ||
++            !wcsicmp( package->ProductCode, L"{6172DDB3-98E6-46E1-A0C1-DB8FD05063EF}" )) &&
++           GetEnvironmentVariableW( L"SOLIDWORKS_MSI_IGNORE_REGISTRATION_DEBUGGER_INACTIVE",
++                                    enabled, ARRAY_SIZE(enabled) ) == 1 && enabled[0] != L'0';
++}
++
++static BOOL ignore_solidworks_registration_failure( const MSIPACKAGE *package,
++                                                     const WCHAR *action, DWORD code )
++{
++    return (code == STATUS_ACCESS_VIOLATION || code == STATUS_DEBUGGER_INACTIVE) && action &&
++           (!wcscmp( action, L"SWRegistrationProcess" ) ||
++            !wcscmp( action, L"SWUnRegistration" ) ||
++            !wcscmp( action, L"SWRegistration" ) ||
++            !wcscmp( action, L"SWRegistrationCleanup" )) &&
++           solidworks_registration_workaround_enabled( package );
++}
++
++static BOOL solidworks_spatial_iop_payload_ready( const MSIPACKAGE *package,
++                                                  const WCHAR *action )
++{
++    WCHAR enabled[2];
++
++    return action &&
++           (!wcscmp( action, L"InstallSpatialIOP" ) ||
++            !wcscmp( action, L"CopySpatialIOP" )) &&
++           package && package->ProductCode &&
++           !wcsicmp( package->ProductCode, L"{6172DDB3-98E6-46E1-A0C1-DB8FD05063EF}" ) &&
++           GetEnvironmentVariableW( L"SOLIDWORKS_MSI_SPATIAL_IOP_PREEXTRACTED",
++                                    enabled, ARRAY_SIZE(enabled) ) == 1 && enabled[0] != L'0' &&
++           GetFileAttributesW( L"C:\\Program Files\\SOLIDWORKS Corp\\SOLIDWORKS\\spiop\\files\\code\\bin\\7z.dll" ) != INVALID_FILE_ATTRIBUTES &&
++           GetFileAttributesW( L"C:\\Program Files\\SOLIDWORKS Corp\\SOLIDWORKS\\spiop\\files\\startup\\XCAD\\EntityMapping\\REVIT_BimTypeToNeutralID.xml" ) != INVALID_FILE_ATTRIBUTES;
++}
++
++static BOOL ignore_solidworks_spatial_iop_failure( const MSIPACKAGE *package,
++                                                   const WCHAR *action, DWORD code )
++{
++    return code == ERROR_INSTALL_FAILURE &&
++           solidworks_spatial_iop_payload_ready( package, action );
++}
++
++static UINT custom_get_thread_return( MSIPACKAGE *package, HANDLE thread, const WCHAR *action )
+ {
+     DWORD rc = 0;
+ 
+     GetExitCodeThread( thread, &rc );
+ 
++    /* Wine has no Windows compressed-folder shell namespace, so the vendor's
++     * install action cannot open the archive through SHBindToObject.  During a
++     * repair the sibling copy action also fails because the cached MSI source
++     * no longer contains spatialiop.zip.  The launcher pre-extracts the same
++     * archive and sets the opt-in flag; accept only these exact product/actions
++     * after verifying files from both ends of the archive are present. */
++    if (ignore_solidworks_spatial_iop_failure( package, action, rc ))
++    {
++        WARN( "accepting pre-extracted SOLIDWORKS Spatial IOP payload after action %s returned %#lx\n",
++              debugstr_w(action), rc );
++        return ERROR_SUCCESS;
++    }
++
+     switch (rc)
+     {
+     case ERROR_FUNCTION_NOT_CALLED:
+@@ -339,6 +397,12 @@ static UINT custom_get_thread_return( MSIPACKAGE *package, HANDLE thread )
+         ACTION_ForceReboot( package );
+         return ERROR_SUCCESS;
+     default:
++        if (ignore_solidworks_registration_failure( package, action, rc ))
++        {
++            WARN( "ignoring post-registration exception %#lx from SOLIDWORKS action %s\n",
++                  rc, debugstr_w(action) );
++            return ERROR_SUCCESS;
++        }
+         ERR( "invalid Return Code %lu\n", rc );
+         return ERROR_INSTALL_FAILURE;
+     }
+@@ -413,7 +477,7 @@ static UINT wait_thread_handle( custom_action_info *info )
+         msi_dialog_check_messages( info->handle );
+ 
+         if (!(info->type & msidbCustomActionTypeContinue))
+-            rc = custom_get_thread_return( info->package, info->handle );
++            rc = custom_get_thread_return( info->package, info->handle, info->action );
+ 
+         free_custom_action_data( info );
+     }
+@@ -554,11 +618,13 @@ UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid)
+         {
+             r = custom_proc_wrapper( fn, hPackage );
+         }
+-        __EXCEPT_PAGE_FAULT
++        __EXCEPT_ALL
+         {
+-            ERR( "Custom action (%s:%s) caused a page fault: %#lx\n",
+-                 debugstr_w(dll), debugstr_a(proc), GetExceptionCode() );
+-            r = ERROR_SUCCESS;
++            DWORD code = GetExceptionCode();
++
++            ERR( "Custom action (%s:%s) caused an exception: %#lx\n",
++                 debugstr_w(dll), debugstr_a(proc), code );
++            r = ERROR_INSTALL_FAILURE;
+         }
+         __ENDTRY;
+     }
+@@ -597,9 +663,38 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
+     HANDLE token;
+     void *cookie;
+     HANDLE pipe;
++    HANDLE *server_process, *server_pipe;
++
++    if (arch == SCS_32BIT_BINARY)
++    {
++        server_process = &package->custom_server_32_process;
++        server_pipe = &package->custom_server_32_pipe;
++    }
++    else
++    {
++        server_process = &package->custom_server_64_process;
++        server_pipe = &package->custom_server_64_pipe;
++    }
+ 
+-    if ((arch == SCS_32BIT_BINARY && package->custom_server_32_process) ||
+-        (arch == SCS_64BIT_BINARY && package->custom_server_64_process))
++    /* The affected SOLIDWORKS registration actions complete their work but
++     * corrupt the custom action server's return path under Wine.  Once the
++     * resulting exception has been converted to success, discard that dead
++     * helper so later deferred custom actions do not inherit its broken pipe. */
++    if (*server_process && solidworks_registration_workaround_enabled( package ) &&
++        WaitForSingleObject( *server_process, 0 ) == WAIT_OBJECT_0)
++    {
++        DWORD exit_code;
++
++        GetExitCodeProcess( *server_process, &exit_code );
++        WARN( "restarting dead SOLIDWORKS registration custom action server, exit code %#lx\n",
++              exit_code );
++        CloseHandle( *server_process );
++        CloseHandle( *server_pipe );
++        *server_process = NULL;
++        *server_pipe = NULL;
++    }
++
++    if (*server_process)
+         return ERROR_SUCCESS;
+ 
+     swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d",
+@@ -1448,6 +1543,19 @@ UINT ACTION_CustomAction(MSIPACKAGE *package, const WCHAR *action)
+         action = ptr + 1;
+     }
+ 
++    /* The vendor action removes the destination before attempting to open
++     * spatialiop.zip through the Windows compressed-folder shell namespace,
++     * which Wine does not implement.  Once the launcher has verified and
++     * pre-extracted that payload, skip these exact SOLIDWORKS actions before
++     * they can delete it.  The post-action check above remains as a fallback
++     * for packages that do not remove an already-populated destination. */
++    if (solidworks_spatial_iop_payload_ready( package, action ))
++    {
++        WARN( "skipping SOLIDWORKS Spatial IOP action %s for verified pre-extracted payload\n",
++              debugstr_w(action) );
++        return ERROR_SUCCESS;
++    }
++
+     row = MSI_QueryGetRecord( package->db, L"SELECT * FROM `CustomAction` WHERE `Action` = '%s'", action );
+     if (!row)
+         return ERROR_FUNCTION_NOT_CALLED;

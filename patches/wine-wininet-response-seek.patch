@@ -1,0 +1,37 @@
+diff --git a/dlls/wininet/http.c b/dlls/wininet/http.c
+index 48bfe35866a..00fc100ac76 100644
+--- a/dlls/wininet/http.c
++++ b/dlls/wininet/http.c
+@@ -3210,6 +3210,7 @@ static DWORD async_read(http_request_t *req, void *buf, DWORD size, DWORD read_p
+ static DWORD HTTPREQ_SetFilePointer(object_header_t *hdr, LONG lDistanceToMove, DWORD dwMoveContext)
+ {
+     http_request_t *req = (http_request_t*)hdr;
++    ULONGLONG buffer_start, buffer_end;
+     DWORD res = INVALID_SET_FILE_POINTER, err = ERROR_SUCCESS;
+ 
+     if(req->hdr.dwFlags & (INTERNET_FLAG_DONT_CACHE|INTERNET_FLAG_NO_CACHE_WRITE)) {
+@@ -3239,8 +3240,22 @@ static DWORD HTTPREQ_SetFilePointer(object_header_t *hdr, LONG lDistanceToMove,
+     }
+ 
+     if(err == ERROR_SUCCESS) {
+-        req->content_pos = res;
+-        req->read_pos = req->read_size = 0;
++        /* Preserve and reuse response bytes which were prefetched while the
++         * headers were read.  In particular, callers commonly rewind a small
++         * response before handing it to an XML parser. */
++        buffer_start = req->content_pos > req->read_pos ? req->content_pos - req->read_pos : 0;
++        buffer_end = req->content_pos + req->read_size;
++        if (res >= buffer_start && res <= buffer_end) {
++            if (res < req->content_pos)
++                req->read_pos -= req->content_pos - res;
++            else
++                req->read_pos += res - req->content_pos;
++            req->read_size = buffer_end - res;
++            req->content_pos = res;
++        } else if (res != req->content_pos) {
++            req->content_pos = res;
++            req->read_pos = req->read_size = 0;
++        }
+     }
+ 
+     LeaveCriticalSection(&req->read_section);

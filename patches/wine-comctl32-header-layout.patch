@@ -1,0 +1,12 @@
+--- a/dlls/comctl32/header.c
++++ b/dlls/comctl32/header.c
+@@ -1465,6 +1465,9 @@
+ static LRESULT
+ HEADER_Layout (HEADER_INFO *infoPtr, LPHDLAYOUT lpLayout)
+ {
++    /* SOLIDWORKS can query layout before supplying a layout structure. */
++    if (!lpLayout || !lpLayout->prc || !lpLayout->pwpos) return FALSE;
++
+     lpLayout->pwpos->hwndInsertAfter = 0;
+     lpLayout->pwpos->x = lpLayout->prc->left;
+     lpLayout->pwpos->y = lpLayout->prc->top;

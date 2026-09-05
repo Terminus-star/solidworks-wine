@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "project": "solidworks-wine",
+  "status": "experimental-single-host-validation",
+  "target": {
+    "solidworks_release": "2026 SP03.2",
+    "msi_version": "34.132.0003",
+    "core_product_code": "{6172DDB3-98E6-46E1-A0C1-DB8FD05063EF}",
+    "login_manager_product_code": "{DFB580AD-E043-49A4-9380-F0D054E1C0FF}",
+    "architecture": "x86_64-linux-with-32-bit-userspace",
+    "windows_version": "win11",
+    "language_transform": "1033.mst"
+  },
+  "wine": {
+    "version": "9.22",
+    "source_url": "https://dl.winehq.org/wine/source/9.x/wine-9.22.tar.xz",
+    "source_sha256": "e150d29742aa54f768ef3e976ed861aaa4f9f48542e409bea902d0f49b359683",
+    "source_directory": "wine-9.22",
+    "build_model": "classic-wow64-64bit-pe-and-32bit-winelib",
+    "patches": [
+      "patches/wine-windows-ui-text-scale.patch",
+      "patches/wine-urlmon-msxml-stream.patch",
+      "patches/wine-wininet-response-seek.patch",
+      "patches/wine-msi-solidworks-actions.patch",
+      "patches/wine-comctl32-header-layout.patch"
+    ]
+  },
+  "host_dependencies": {
+    "python_minimum": "3.10",
+    "tools": ["bash", "git", "rg", "python3", "7z", "unzip", "patch", "make", "gcc", "g++", "flex", "bison", "pkg-config", "winetricks", "i686-w64-mingw32-gcc", "x86_64-w64-mingw32-gcc"],
+    "desktop_tools": ["xdg-user-dir", "gio", "desktop-file-validate"],
+    "optional_python": {"websocket-client": "1.8.0"}
+  },
+  "prefix_prerequisites": ["corefonts", "vcrun2010", "vcrun2022", "dotnet48", "msxml3", "msxml6"],
+  "vendor_prerequisites": ["VBA 7.1 x64 and English resources", "VSTA 2022", "CEF for SOLIDWORKS", "Login Manager (repaired after core install)"],
+  "external_inputs": [
+    "User-owned complete SOLIDWORKS 2026 SP03.2 media including Toolbox and Login Manager",
+    "User's own valid serial, entered privately",
+    "Vendor license agreement and activation completed by the user",
+    "WebView2 runtime if using the optional graphical downloader"
+  ],
+  "paths": {
+    "runtime": "wine-runtime",
+    "prefix": "prefix",
+    "media": "full-media",
+    "serial": "serial.txt",
+    "logs": "logs"
+  },
+  "workflow": [
+    {"id": "read", "command": "Read README.md and docs/INSTALL.md", "mutates_prefix": false},
+    {"id": "host", "command": "./bin/check-host.sh", "mutates_prefix": false},
+    {"id": "runtime_prepare", "command": "python3 bin/build-wine-runtime.py --prepare-only", "mutates_prefix": false},
+    {"id": "runtime_build", "command": "python3 bin/build-wine-runtime.py --build --jobs 4", "mutates_prefix": false},
+    {"id": "helpers", "command": "./bin/build-helpers.sh", "mutates_prefix": false},
+    {"id": "prefix", "command": "./bin/setup-prefix.sh", "mutates_prefix": true},
+    {"id": "serial", "command": "python3 bin/set-serial.py", "mutates_prefix": false},
+    {"id": "vendor_plan", "command": "./bin/install-vendor-prerequisites.sh --plan", "mutates_prefix": false},
+    {"id": "vendor_install", "command": "./bin/install-vendor-prerequisites.sh --install", "mutates_prefix": true},
+    {"id": "plan", "command": "./bin/install-solidworks-direct.sh --plan", "mutates_prefix": false},
+    {"id": "install", "command": "./bin/install-solidworks-direct.sh", "mutates_prefix": true},
+    {"id": "verify", "command": "./bin/install-solidworks-direct.sh --verify", "mutates_prefix": false},
+    {"id": "fonts", "command": "./bin/configure-fonts.sh", "mutates_prefix": true},
+    {"id": "desktop", "command": "./bin/install-desktop-shortcut.sh", "mutates_prefix": false},
+    {"id": "activate", "command": "./bin/run-solidworks.sh --no-splash", "human_action": "Complete official license activation"},
+    {"id": "smoke", "human_action": "Create and close a new part, restart, and confirm settings persist"}
+  ],
+  "validation": {
+    "source_packaging": {"date": "2026-09-04", "unit_tests_passed": 33, "shellcheck": "0.8.0", "native_helpers_compiled": 6, "separate_source_export_tested": true, "patch_application_zero_fuzz": true, "fresh_full_runtime_and_application_install": false},
+    "original_host": "Linux Mint 21.3, x86_64, Cinnamon X11, AMD RX 5600-series, Wine 9.22",
+    "observed": ["MSI install success", "141 selected feature audit", "Login Manager registration", "new part workspace", "normal exit", "Selawik fallback", "no-splash launch"],
+    "not_proven": ["clean full runtime rebuild and SOLIDWORKS reinstall on another host", "other distributions", "Wayland-only session", "ARM", "other SOLIDWORKS versions", "all add-ins", "production CAD workloads"],
+    "activation": "User-specific; never inferred from product registration or copied to another machine"
+  }
+}
