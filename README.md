@@ -1,4 +1,4 @@
-# SOLIDWORKS 2026 on Linux / Wine
+# SOLIDWORKS 2026 on Linux: Reproducible Wine Compatibility Toolkit
 
 An independent, experimental compatibility toolkit for **SOLIDWORKS 2026
 SP03.2 and Wine 9.22**. It preserves the fixes, installation helpers, font

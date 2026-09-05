@@ -8,8 +8,10 @@ state. Keep private, recoverable backups of your own installation separately.
 
 1. Sign in to GitHub and open [New repository](https://github.com/new).
 2. Choose your account, the name `solidworks-wine`, and **Public** for community
-   access. Suggested description: “Experimental SOLIDWORKS 2026 SP03.2 / Wine
-   9.22 toolkit: source patches, safe installers, and Linux reproduction docs.”
+   access. The README title is **“SOLIDWORKS 2026 on Linux: Reproducible Wine
+   Compatibility Toolkit.”** Suggested description: “Experimental SOLIDWORKS
+   2026 SP03.2 / Wine 9.22 toolkit: source patches, safe installers, and Linux
+   reproduction docs.”
 3. Leave **Add README**, **Add .gitignore**, and **Choose a license** unselected:
    these are already in this project. Click **Create repository**.
 4. Connect and push the prepared local repository as shown below. Replace
