@@ -48,6 +48,10 @@ fi
 
 WINE_BIN="$(resolve_command "$requested_wine" wine)"
 WINE64_BIN="$(companion_command "$WINE_BIN" wine64)"
+# New-WoW64 builds (one `wine` for 32- and 64-bit, e.g. Wine 10+ distro
+# packages) ship no wine64; companion_command then returns a missing path,
+# which winetricks would trust. Fall back to wine itself, as winetricks does.
+[[ -x "$WINE64_BIN" ]] || WINE64_BIN="$WINE_BIN"
 WINEBOOT_BIN="$(companion_command "$WINE_BIN" wineboot)"
 WINESERVER_BIN="$(companion_command "$WINE_BIN" wineserver)"
 WINECFG_BIN="$(companion_command "$WINE_BIN" winecfg)"
