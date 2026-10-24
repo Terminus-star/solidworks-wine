@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# solidworks-2022 — start SOLIDWORKS under Wine from an existing Windows
+# install (see inplace/README.md in the solidworks-wine repo).
+#
+# SOLIDWORKS runs in place from the Windows partition (/mnt/windows), linked
+# into the prefix; it must be mounted, and Windows must not be running (VM or
+# native) while it is.
+#
+# Startup is pinned to one CPU core, then widened to all cores once the main
+# window is up. This avoids an intermittent startup deadlock between Wine's
+# loader lock and SOLIDWORKS' own locks (MFC / FlexNet): in testing, unpinned
+# launches deadlocked 5/5, pinned 0/5.
+#
+# Environment overrides:
+#   WINE_BIN   default /opt/wine-cachyos-portal/bin/wine
+#              (/opt/wine-cachyos/bin/wine works too, without native dialogs)
+#   PREFIX     default ~/.local/share/wineprefixes/solidworks-2022
+#   WIN_ROOT   default /mnt/windows (only used for the "is it mounted" check)
+#   WINEDEBUG  default -all (e.g. +loaddll,+module,+seh to trace a problem)
+#   NO_PIN=1   skip CPU pinning during startup
+#   TIMEOUT    seconds to wait for the main window (default 300)
+#
+# Logs: ~/.local/state/solidworks-2022/launch-<timestamp>.log
+
+set -uo pipefail
+
+WINE_BIN="${WINE_BIN:-/opt/wine-cachyos-portal/bin/wine}"
+PREFIX="${PREFIX:-$HOME/.local/share/wineprefixes/solidworks-2022}"
+WIN_ROOT="${WIN_ROOT:-/mnt/windows}"
+TRACE="${WINEDEBUG:--all}"
+TIMEOUT="${TIMEOUT:-300}"
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/solidworks-2022"
+ALL_CPUS="0-$(( $(nproc) - 1 ))"
+mkdir -p "$LOGDIR"
+LOG="$LOGDIR/launch-$(date +%Y%m%d-%H%M%S).log"
+
+notify() {
+    notify-send -a "SOLIDWORKS" -i solidworks-2022 "$1" "${2:-}" 2>/dev/null || true
+}
+
+# Find SLDWORKS.exe through the prefix's links (whatever folder it's in).
+exe=$(find -L "$PREFIX/drive_c/Program Files/SOLIDWORKS Corp" \
+               "$PREFIX/drive_c/Program Setups/SolidWorks" \
+          -maxdepth 2 -iname 'SLDWORKS.exe' -print -quit 2>/dev/null)
+
+if [[ ! -x "$WINE_BIN" ]]; then
+    notify "Wine not found" "$WINE_BIN"; echo "solidworks: $WINE_BIN not found" >&2; exit 1
+fi
+if [[ -z "$exe" ]] || ! mountpoint -q "$WIN_ROOT"; then
+    notify "Windows partition not mounted" "Mount $WIN_ROOT first."
+    echo "solidworks: $WIN_ROOT not mounted or SLDWORKS.exe not linked (inplace/sw-link.sh)" >&2; exit 1
+fi
+
+# Windows paths for start /d and the program itself.
+SW_DIR="C:\\${exe#"$PREFIX/drive_c/"}"
+SW_DIR="${SW_DIR%/*}"
+SW_DIR="${SW_DIR//\//\\}"
+
+# PIDs of every Linux process that belongs to this Wine prefix.
+prefix_pids() {
+    local pid p
+    for pid in $(pgrep -f 'wine|\.exe'); do
+        p=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -m1 '^WINEPREFIX=')
+        [[ "${p#WINEPREFIX=}" == "$PREFIX" ]] && echo "$pid"
+    done
+}
+
+# Widen the CPU set of all threads (-a) of every process in the prefix.
+unpin_all() {
+    local pid
+    for pid in $(prefix_pids); do
+        taskset -a -p -c "$ALL_CPUS" "$pid" >/dev/null 2>&1
+    done
+}
+
+pin=(taskset -c 0)
+[[ "${NO_PIN:-}" == 1 ]] && pin=()
+
+"${pin[@]}" env WINEPREFIX="$PREFIX" WINEDEBUG="$TRACE" \
+    WINEDLLOVERRIDES='winemenubuilder.exe=d' \
+    "$WINE_BIN" start /wait /d "$SW_DIR" "$SW_DIR\\SLDWORKS.exe" \
+    > "$LOG" 2>&1 &
+
+start=$SECONDS
+result=timeout
+while (( SECONDS - start < TIMEOUT )); do
+    sleep 2
+    # Wine reports a stuck lock after 60 s (only visible if WINEDEBUG keeps err).
+    if grep -q 'loader_section" wait timed out' "$LOG" 2>/dev/null; then
+        result=deadlock; break
+    fi
+    if xdotool search --onlyvisible --name '^SOLIDWORKS' >/dev/null 2>&1; then
+        result=window; break
+    fi
+    if (( SECONDS - start > 15 )) && ! pgrep -f 'SLDWORKS\.exe' >/dev/null; then
+        result=exited; break
+    fi
+done
+
+unpin_all
+echo "solidworks: $result after $(( SECONDS - start ))s (log: $LOG)"
+[[ "$result" == window ]] || notify "SOLIDWORKS didn't open ($result)" "Log: $LOG"

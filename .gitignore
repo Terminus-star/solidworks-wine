@@ -11,6 +11,11 @@
 /download-prefix/
 __pycache__/
 
+# In-place route: registry exports contain licence server and personal
+# settings; launch-test results contain local paths
+sw-registry/
+/launch-tests.tsv
+
 # Local configuration, credentials, generated launchers, and licensed artwork
 /config.local.sh
 /.env
