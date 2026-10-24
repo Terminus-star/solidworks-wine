@@ -1,0 +1,43 @@
+[solidworks-main-window]
+Description=SOLIDWORKS (Wine) main window: maximized, not fullscreen - stops focus flicker
+fullscreen=false
+fullscreenrule=2
+maximizehoriz=true
+maximizehorizrule=2
+maximizevert=true
+maximizevertrule=2
+title=SOLIDWORKS
+titlematch=2
+types=1
+wmclass=steam_proton
+wmclassmatch=1
+
+[solidworks-document-proxy]
+Description=SOLIDWORKS (Wine) hidden 1x1 document windows: never take focus
+acceptfocus=false
+acceptfocusrule=2
+title=(?i)\\.(sldprt|sldasm|slddrw)( \\*)?$
+titlematch=3
+types=1
+wmclass=steam_proton
+wmclassmatch=1
+
+[solidworks-splash]
+Description=SOLIDWORKS (Wine) splash screen: show in taskbar
+skiptaskbar=false
+skiptaskbarrule=2
+title=splash
+titlematch=1
+types=32
+wmclass=steam_proton
+wmclassmatch=1
+
+[solidworks-filter-quick-hits]
+Description=SOLIDWORKS (Wine) "Filter Quick Hits" list: never take focus (stops focus jumping to 3D view)
+acceptfocus=false
+acceptfocusrule=2
+title=Filter Quick Hits
+titlematch=1
+types=1
+wmclass=steam_proton
+wmclassmatch=1
