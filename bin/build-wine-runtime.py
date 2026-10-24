@@ -106,13 +106,23 @@ def prepare(manifest, work, supplied_archive=None):
 
 def build_commands(source, work, runtime, jobs):
     build64, build32 = work / 'build64', work / 'build32'
+    # GCC 15+ defaults to C23, where `bool` is a keyword; Wine 9.22 still uses
+    # it as an identifier. Pin C17 for the host compiler (CFLAGS) and the
+    # MinGW compiler that builds the PE DLLs (CROSSCFLAGS). configure accepts
+    # VAR=value arguments and exports them, like it did for CC= before.
+    c17 = '-g -O2 -std=gnu17'
     options = ['--prefix=' + str(runtime), '--without-wayland', '--with-x',
-               '--with-freetype', '--with-opengl', '--with-gnutls']
+               '--with-freetype', '--with-opengl', '--with-gnutls',
+               'CFLAGS=' + c17, 'CROSSCFLAGS=' + c17]
     return [
         (build64, [str(source / 'configure'), '--enable-win64', *options]),
         (build64, ['make', '-j' + str(jobs)]),
+        # No CC='gcc -m32' here: configure adds -m32 itself on x86_64 hosts
+        # and also sets TARGETFLAGS=-m32 (so the shared widl emits 32-bit
+        # proxies) and the 32-bit pkg-config path. Overriding CC makes it
+        # detect an i686 host and skip all three.
         (build32, [str(source / 'configure'), '--with-wine64=' + str(build64),
-                   '--without-mingw', 'CC=gcc -m32', *options]),
+                   '--without-mingw', *options]),
         (build32, ['make', '-j' + str(jobs)]),
         (build32, ['make', 'install']),
         (build64, ['make', 'install']),
